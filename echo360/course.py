@@ -242,75 +242,9 @@ class EchoCloudCourse(EchoCourse):
                             
                             # Process transcript immediately for this lecture
                             try:
-                                # Get the media ID
-                                media_id = None
-                                for media in item["lesson"]["medias"]:
-                                    if media["mediaType"] == "Video":
-                                        media_id = media["id"]
-                                        break
-                                
-                                if media_id is not None:
-                                    # Setup paths
-                                    lecture_name = strip_illegal_path(item["lesson"]["lesson"]["name"])
-                                    
-                                    # Get lecture date
-                                    lecture_date = None
-                                    if "startTimeUTC" in item["lesson"]:
-                                        if item["lesson"]["startTimeUTC"] is not None:
-                                            lecture_date = item["lesson"]["startTimeUTC"][:10]  # Get YYYY-MM-DD part
-                                    if not lecture_date and "createdAt" in item["lesson"]["lesson"]:
-                                        lecture_date = item["lesson"]["lesson"]["createdAt"][:10]
-                                    if not lecture_date:
-                                        lecture_date = "1970-01-01"
-                                    
-                                    # Skip if we've already processed a lecture on this date
-                                    if lecture_date in self._processed_lecture_dates:
-                                        print(f"\n>> Skipping duplicate lecture on {lecture_date}: {lecture_name}")
-                                        self._processed_lectures += 1
-                                        self._update_progress()
-                                        continue
-                                        
-                                    self._processed_lecture_dates.add(lecture_date)
-                                        
-                                    # Create filename with date
-                                    filename = f"{lecture_date}_{lecture_name}"
-                                    course_dir = os.path.join("default_out_path", self._course_name)
-                                    dirty_dir = os.path.join(course_dir, "dirty")
-                                    clean_dir = os.path.join(course_dir, "clean")
-                                    
-                                    # Create directories if needed
-                                    os.makedirs(dirty_dir, exist_ok=True)
-                                    os.makedirs(clean_dir, exist_ok=True)
-                                    
-                                    # Define file paths
-                                    dirty_path = os.path.join(dirty_dir, f"{filename}.vtt")
-                                    clean_path = os.path.join(clean_dir, f"{filename}.txt")
-                                    
-                                    # Skip if already processed
-                                    if not os.path.exists(clean_path):
-                                        # Get transcript
-                                        vtt_url = f"{self.hostname}/api/ui/echoplayer/lessons/{item['lesson']['lesson']['id']}/medias/{media_id}/transcript-file?format=vtt"
-                                        session = requests.Session()
-                                        for cookie in self._driver.get_cookies():
-                                            session.cookies.set(cookie["name"], cookie["value"])
-                                            
-                                        response = session.get(vtt_url)
-                                        if response.status_code == 200:
-                                            # Save VTT file
-                                            with open(dirty_path, "wb") as f:
-                                                f.write(response.content)
-                                            print(f"\n>> Saved VTT transcript to: {dirty_path}")
-                                            
-                                            # Use external vtt_to_text script
-                                            from vtt_to_text import convert_vtt_to_text
-                                            output_path = convert_vtt_to_text(dirty_path, clean_dir)
-                                            print(f">> Saved clean transcript to: {output_path}")
-                                        else:
-                                            print(f"\n>> No transcript available for: {filename}")
-                                    else:
-                                        print(f"\n>> Transcript already exists for: {filename}")
+                                self._process_lecture_transcript(item)
                             except Exception as e:
-                                print(f"\n>> Error processing transcript for {filename}: {str(e)}")
+                                print(f"\n>> Error processing transcript for {item['lesson']['lesson']['name']}: {str(e)}")
                             
                             # Update progress
                             self._processed_lectures += 1
@@ -389,6 +323,19 @@ class EchoCloudCourse(EchoCourse):
             dirty_dir = os.path.join(course_dir, "dirty")
             clean_dir = os.path.join(course_dir, "clean")
             
+            # Get lecture date
+            lecture_date = None
+            if "startTimeUTC" in video_json["lesson"]:
+                if video_json["lesson"]["startTimeUTC"] is not None:
+                    lecture_date = video_json["lesson"]["startTimeUTC"][:10]  # Get YYYY-MM-DD part
+            if not lecture_date and "createdAt" in video_json["lesson"]["lesson"]:
+                lecture_date = video_json["lesson"]["lesson"]["createdAt"][:10]
+            if not lecture_date:
+                lecture_date = "1970-01-01"
+            
+            # Create filename with date
+            filename = f"{lecture_date}_{filename}"
+            
             # Create directories if needed
             os.makedirs(dirty_dir, exist_ok=True)
             os.makedirs(clean_dir, exist_ok=True)
@@ -398,25 +345,62 @@ class EchoCloudCourse(EchoCourse):
             clean_path = os.path.join(clean_dir, f"{filename}.txt")
             
             # Skip if already processed
-            if os.path.exists(clean_path):
-                return
-                
-            # Get transcript
-            vtt_url = f"{self.hostname}/api/ui/echoplayer/lessons/{video_json['lesson']['lesson']['id']}/medias/{media_id}/transcript-file?format=vtt"
-            session = requests.Session()
-            for cookie in self._driver.get_cookies():
-                session.cookies.set(cookie["name"], cookie["value"])
-                
-            response = session.get(vtt_url)
-            if response.status_code == 200:
-                # Save VTT file
-                with open(dirty_path, "wb") as f:
-                    f.write(response.content)
-                
-                # Use external vtt_to_text script
-                from vtt_to_text import convert_vtt_to_text
-                output_path = convert_vtt_to_text(dirty_path, clean_dir)
+            if not os.path.exists(clean_path):
+                # Get transcript
+                vtt_url = f"{self.hostname}/api/ui/echoplayer/lessons/{video_json['lesson']['lesson']['id']}/medias/{media_id}/transcript-file?format=vtt"
+                session = requests.Session()
+                for cookie in self._driver.get_cookies():
+                    session.cookies.set(cookie["name"], cookie["value"])
                     
+                response = session.get(vtt_url)
+                if response.status_code == 200:
+                    # Save VTT file
+                    with open(dirty_path, "wb") as f:
+                        f.write(response.content)
+                    print(f"\n>> Saved VTT transcript to: {dirty_path}")
+                    
+                    # Use external vtt_to_text script
+                    from vtt_to_text import convert_vtt_to_text
+                    output_path = convert_vtt_to_text(dirty_path, clean_dir)
+                    print(f">> Saved clean transcript to: {output_path}")
+                    
+                    # Import summarization functions
+                    try:
+                        from summarize_transcripts import setup_openai_client, summarize_transcript
+                        
+                        # Setup OpenAI client
+                        client = setup_openai_client()
+                        if client:
+                            # Create summaries directory for PDFs
+                            summaries_dir = os.path.join(course_dir, "summaries")
+                            pdf_dir = os.path.join(summaries_dir, "pdf")
+                            temp_dir = os.path.join(summaries_dir, "temp")
+                            os.makedirs(pdf_dir, exist_ok=True)
+                            os.makedirs(temp_dir, exist_ok=True)
+                            
+                            # Define PDF path
+                            pdf_path = os.path.join(pdf_dir, f"{filename}.pdf")
+                            
+                            # Read clean transcript
+                            with open(clean_path, 'r', encoding='utf-8') as f:
+                                transcript = f.read()
+                                
+                            # Generate summary PDF
+                            print(f">> Generating summary PDF for: {filename}")
+                            summarize_transcript(transcript, pdf_path, course_name, filename, client, temp_dir)
+                            
+                            # Clean up temp directory
+                            import shutil
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                    except ImportError:
+                        print(">> Note: Summarization module not available - skipping summary generation")
+                    except Exception as e:
+                        print(f">> Error generating summary: {str(e)}")
+                else:
+                    print(f"\n>> No transcript available for: {filename}")
+            else:
+                print(f"\n>> Transcript already exists for: {filename}")
+            
         except Exception as e:
             print(f"\nError processing transcript for {filename}: {str(e)}")
 
