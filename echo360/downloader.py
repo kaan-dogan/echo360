@@ -336,10 +336,7 @@ class EchoDownloader(object):
 
     def download_all(self):
         if self.setup_credential:
-            sys.stdout.write(
-                ">> I'm gonna assume you are responsible enough to had "
-                "finished logged in by now ;)\n"
-            )
+            sys.stdout.write(">> Continuing with the rest of the script\n")
         else:
             sys.stdout.write('>> Logging into "{0}"... '.format(self._course.url))
             sys.stdout.flush()
@@ -354,7 +351,7 @@ class EchoDownloader(object):
                 self._output_dir,
                 "{0}".format(self._course.nice_name).strip(),
             )
-        if self._output_dir and not os.path.isdir(self._output_dir):
+        if self._output_dir and not os.path.exists(self._output_dir):
             os.makedirs(self._output_dir)
         if self._dump_json:
             dump_json_path = os.path.join(
@@ -371,14 +368,9 @@ class EchoDownloader(object):
         videos_to_be_download = []
         for video in reversed(filtered_videos):  # reverse so we download newest first
             lecture_number = self._find_pos(videos, video)
-            # Sometimes a video could have multiple part. This special method returns a
-            # generator where: (i) if it's a multi-part video it will contains multiple
-            # videos and (ii) if it is NOT a multi-part video, it will just
-            # returns itself
             sub_videos = video.get_all_parts()
             for sub_i, sub_video in reversed(list(enumerate(sub_videos))):
                 sub_lecture_num = lecture_number + 1
-                # use a friendly way to name sub-part lectures
                 if len(sub_videos) > 1:
                     sub_lecture_num = "{}.{}".format(sub_lecture_num, sub_i + 1)
                 title = "Lecture {} [{}]".format(sub_lecture_num, sub_video.title)
@@ -387,9 +379,7 @@ class EchoDownloader(object):
                 )
                 videos_to_be_download.append((filename, sub_video))
         if self.interactive_mode:
-            title = (
-                "Select video(s) to be downloaded (SPACE to mark, ENTER to continue):"
-            )
+            title = "Select video(s) to be downloaded (SPACE to mark, ENTER to continue):"
             selected = pick(
                 [v[0] for v in videos_to_be_download],
                 title,
@@ -397,15 +387,6 @@ class EchoDownloader(object):
                 min_selection_count=1,
             )
             videos_to_be_download = [videos_to_be_download[s[1]] for s in selected]
-
-        print("=" * 60)
-        print("    Course: {0}".format(self._course.nice_name))
-        print(
-            "      Total videos to download: {0} out of {1}".format(
-                len(videos_to_be_download), len(videos)
-            )
-        )
-        print("=" * 60)
 
         downloaded_videos = []
         for filename, video in videos_to_be_download:
@@ -417,7 +398,6 @@ class EchoDownloader(object):
             else:
                 if video.download(self._output_dir, filename):
                     downloaded_videos.insert(0, filename)
-        print(self.success_msg(self._course.course_name, downloaded_videos))
         self._driver.close()
 
     @property

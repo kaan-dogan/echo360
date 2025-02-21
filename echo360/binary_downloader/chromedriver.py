@@ -4,8 +4,8 @@ from .downloader import BinaryDownloader
 class ChromedriverDownloader(BinaryDownloader):
     def __init__(self):
         self._name = "chromedriver"
-        self._download_link_root = "https://chromedriver.storage.googleapis.com"
-        self._version = "114.0.5735.90"
+        self._download_link_root = "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing"
+        self._version = "133.0.6943.127"
 
     def get_os_suffix(self):
         self._os_linux_32 = "linux32"
@@ -19,9 +19,9 @@ class ChromedriverDownloader(BinaryDownloader):
 
     def get_download_link(self):
         os_suffix = self.get_os_suffix()
-        filename = "chromedriver_{0}.zip".format(os_suffix)
-        download_link = "{0}/{1}/{2}".format(
-            self._download_link_root, self._version, filename
+        filename = "chromedriver-{0}.zip".format(os_suffix)
+        download_link = "{0}/{1}/{2}/{3}".format(
+            self._download_link_root, self._version, os_suffix, filename
         )
         return download_link, filename
 

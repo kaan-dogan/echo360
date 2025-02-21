@@ -5,77 +5,89 @@ import stat
 import wget
 import shutil
 import logging
+import zipfile
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class BinaryDownloader(object):
     def __init__(self):
-        raise NotImplementedError
+        pass
 
     def get_os_suffix(self):
-        arch = "64" if sys.maxsize > 2**32 else "32"
-        if "linux" in sys.platform:
-            if arch == "64":
-                return self._os_linux_64
+        os_platform = platform.system().lower()
+        arch = platform.architecture()[0]
+        if os_platform == "linux":
+            if arch == "64bit":
+                os_suffix = self._os_linux_64
             else:
-                return self._os_linux_32
-        elif "win32" in sys.platform:
-            if arch == "64":
-                return self._os_windows_64
+                os_suffix = self._os_linux_32
+        elif os_platform == "windows":
+            if arch == "64bit":
+                os_suffix = self._os_windows_64
             else:
-                return self._os_windows_32
-        elif "darwin" in sys.platform:
-            # detect if this is using arm processor (e.g. M1/M2 Mac)
+                os_suffix = self._os_windows_32
+        elif os_platform == "darwin":
             if platform.processor() == "arm":
-                return self._os_darwin_arm
-            if arch == "64":
-                return self._os_darwin_64
+                os_suffix = self._os_darwin_arm
+            elif arch == "64bit":
+                os_suffix = self._os_darwin_64
             else:
-                return self._os_darwin_32
+                os_suffix = self._os_darwin_32
         else:
-            raise Exception("NON-EXISTING OS VERSION")
+            print("Operating System not supported")
+            sys.exit(1)
+        return os_suffix
 
     def get_download_link(self):
         raise NotImplementedError
 
     def get_bin_root_path(self):
-        return "{0}/bin".format(os.getcwd())
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "bin"))
 
     def get_bin(self):
         raise NotImplementedError
 
     def download(self):
-        print(
-            '>> Downloading {0} binary file for "{1}"'.format(
-                self._name, self.get_os_suffix()
+        bin_path = self.get_bin()
+        bin_root_path = self.get_bin_root_path()
+        if not os.path.exists(bin_root_path):
+            os.makedirs(bin_root_path)
+        if not os.path.exists(bin_path):
+            print("=================================================================")
+            print(
+                'Binary file of {0} not found, will initiate a download process now...'.format(
+                    self._name
+                )
             )
-        )
-        # Download bin for this os
-        link, filename = self.get_download_link()
-        bin_path = self.get_bin_root_path()
-        # delete bin directory if exists
-        if os.path.exists(bin_path):
-            shutil.rmtree(bin_path)
-        os.makedirs(bin_path)
-        # remove existing binary file or folder
-        wget.download(link, out="{0}/{1}".format(bin_path, filename))
-        print('\r\n>> Extracting archive file "{0}"'.format(filename))
-        if sys.version_info >= (3, 0):  # compatibility for python 2 & 3
-            shutil.unpack_archive(
-                "{0}/{1}".format(bin_path, filename), extract_dir=bin_path
-            )
-        else:
-            if ".zip" in filename:
-                import zipfile
-
-                with zipfile.ZipFile("{0}/{1}".format(bin_path, filename), "r") as zip:
-                    zip.extractall(bin_path)
-            elif ".tar" in filename:
-                import tarfile
-
-                with tarfile.open("{0}/{1}".format(bin_path, filename)) as tar:
-                    tar.extractall(path=bin_path)
-        # Make the extracted bin executable
-        st = os.stat(self.get_bin())
-        os.chmod(self.get_bin(), st.st_mode | stat.S_IEXEC)
+            download_link, filename = self.get_download_link()
+            _LOGGER.debug("binary_downloader link: %s, bin path: %s", (download_link, filename), bin_path)
+            print('>> Downloading {0} binary file for "{1}"'.format(self._name, self.get_os_suffix()))
+            wget.download(download_link, filename)
+            print("\n>> Extracting archive file", '"{0}"'.format(filename))
+            if filename.endswith(".zip"):
+                with zipfile.ZipFile(filename, "r") as zip_ref:
+                    # Extract all files to a temporary directory
+                    temp_dir = os.path.join(bin_root_path, "temp")
+                    if os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir)
+                    os.makedirs(temp_dir)
+                    zip_ref.extractall(temp_dir)
+                    
+                    # Find the chromedriver executable in the extracted files
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file in files:
+                            if file.startswith("chromedriver"):
+                                src_file = os.path.join(root, file)
+                                shutil.copy2(src_file, bin_path)
+                                break
+                    
+                    # Clean up
+                    shutil.rmtree(temp_dir)
+            else:
+                print("Error: Unsupported archive format")
+                sys.exit(1)
+            print("Done!")
+            print("=================================================================")
+            os.remove(filename)
+            os.chmod(bin_path, 0o755)  # make binary executable

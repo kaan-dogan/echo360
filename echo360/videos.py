@@ -194,32 +194,81 @@ class EchoCloudVideos(EchoVideos):
         hostname,
         alternative_feeds,
         subtitles,
+        course_name=None,
         skip_video_on_error=True,
     ):
         assert course_json is not None
         self._driver = driver
         self._videos = []
+        self._course_name = course_name or "Unknown_Course"
+
+        # Create course directory structure first
+        course_name = strip_illegal_path(self._course_name)
+        course_dir = os.path.join("default_out_path", course_name)
+        dirty_dir = os.path.join(course_dir, "dirty")
+        clean_dir = os.path.join(course_dir, "clean")
+        
+        # Create directories if they don't exist
+        os.makedirs(dirty_dir, exist_ok=True)
+        os.makedirs(clean_dir, exist_ok=True)
 
         # Traverse groups/folders
-        queue = [("", course_json)]
+        queue = [(course_json, "")]  # Start with root items
         videos_json = []
-        # Not sure if the only two types are 'SyllabusLessonType' and 'SyllabusGroupType'.
+        
         while len(queue) > 0:
-            path, items = queue.pop()
+            items, path = queue.pop(0)  # Use pop(0) for FIFO queue
             for item in items:
                 if type(item) is dict:
                     if "lesson" in item["type"].lower():
+                        # First add the current item
                         item["path_prefix"] = path
                         videos_json.append(item)
-                    else:
-                        queue.append(
-                            (
-                                os.path.join(
-                                    path, strip_illegal_path(item["groupInfo"]["name"])
-                                ),
-                                item["lessons"],
-                            )
+                        
+                        # Get video URL and check content
+                        video_url = "{}/lesson/{}/classroom".format(
+                            hostname, 
+                            item["lesson"]["lesson"]["id"]
                         )
+                        
+                        # Check if this class has no content
+                        self._driver.get(video_url)
+                        if "Looks like no content has been added to this class yet" in self._driver.page_source:
+                            print("\nFound 'no content' page - stopping here")
+                            break
+                            
+                        # Try to download transcription immediately
+                        if subtitles:
+                            try:
+                                video = EchoCloudVideo(
+                                    item,
+                                    self._driver,
+                                    hostname,
+                                    alternative_feeds,
+                                    subtitles=True,
+                                    course_name=self._course_name
+                                )
+                                filename = strip_illegal_path(item["lesson"]["lesson"]["name"])
+                                video.download_single(
+                                    requests.Session(),
+                                    None,
+                                    dirty_dir,
+                                    filename,
+                                    pool_size=50
+                                )
+                            except Exception as e:
+                                print(f"Failed to download transcription: {str(e)}")
+                                if not skip_video_on_error:
+                                    raise
+                    else:
+                        # Add group/folder to queue
+                        folder_name = strip_illegal_path(item["groupInfo"]["name"])
+                        # Skip adding redundant folder names
+                        if folder_name.lower() not in ['home', 'echo360', self._course_name.lower()]:
+                            new_path = os.path.join(path, folder_name) if path else folder_name
+                        else:
+                            new_path = path
+                        queue.append((item["lessons"], new_path))
 
         total_videos_num = len(videos_json)
         update_course_retrieval_progress(0, total_videos_num)
@@ -228,7 +277,12 @@ class EchoCloudVideos(EchoVideos):
             try:
                 self._videos.append(
                     EchoCloudVideo(
-                        video_json, self._driver, hostname, alternative_feeds, subtitles
+                        video_json,
+                        self._driver,
+                        hostname,
+                        alternative_feeds,
+                        subtitles,
+                        course_name=self._course_name
                     )
                 )
             except Exception:
@@ -248,7 +302,7 @@ class EchoCloudVideo(EchoVideo):
     def video_url(self):
         return "{}/lesson/{}/classroom".format(self.hostname, self.video_id)
 
-    def __init__(self, video_json, driver, hostname, alternative_feeds, subtitles):
+    def __init__(self, video_json, driver, hostname, alternative_feeds, subtitles, course_name=None):
         self.hostname = hostname
         self._driver = driver
         self._path_prefix = video_json["path_prefix"]
@@ -257,6 +311,8 @@ class EchoCloudVideo(EchoVideo):
         self.sub_videos = [self]
         self.download_alternative_feeds = alternative_feeds
         self.download_subtitles = subtitles
+        self._course_name = course_name or "Unknown_Course"
+        
         if "lessons" in video_json:
             # IS a multi-part lesson.
             self.sub_videos = [
@@ -266,6 +322,7 @@ class EchoCloudVideo(EchoVideo):
                     hostname,
                     group_name=video_json["groupInfo"]["name"],
                     alternative_feeds=alternative_feeds,
+                    course_name=self._course_name
                 )
                 for sub_video_json in video_json["lessons"]
             ]
@@ -283,108 +340,158 @@ class EchoCloudVideo(EchoVideo):
             "Dumping video page at %s: %s", self.video_url, self._driver.page_source
         )
 
-        m3u8_url = self._loop_find_m3u8_url(self.video_url, waitsecond=30)
-        _LOGGER.debug("Found the following urls %s", m3u8_url)
-        self._url = m3u8_url
+        # Only get m3u8 URL if we're not just downloading subtitles
+        if not self.download_subtitles:
+            m3u8_url = self._loop_find_m3u8_url(self.video_url, waitsecond=30)
+            _LOGGER.debug("Found the following urls %s", m3u8_url)
+            self._url = m3u8_url
+        else:
+            self._url = None
 
         self._date = self.get_date(video_json)
         self._title = video_json["lesson"]["lesson"]["name"]
 
     def download(self, output_dir, filename, pool_size=50):
-        output_dir = os.path.join(output_dir, self._path_prefix)
+        # Use the course name from the course details
+        course_name = strip_illegal_path(self._course_name)
+        
+        # Create course directory first
+        course_dir = os.path.join(output_dir, course_name)
+        if not os.path.exists(course_dir):
+            os.makedirs(course_dir)
+            
+        # Create dirty and clean directories inside course directory
+        dirty_dir = os.path.join(course_dir, "dirty")
+        clean_dir = os.path.join(course_dir, "clean")
+        
+        # Create directories if they don't exist
+        if not os.path.exists(dirty_dir):
+            os.makedirs(dirty_dir)
+        if not os.path.exists(clean_dir):
+            os.makedirs(clean_dir)
+        
         print("")
         print("-" * 60)
-        print('Downloading "{}"'.format(filename))
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        print('Downloading "{}" to {}'.format(filename, dirty_dir))
 
         session = requests.Session()
         # load cookies
         for cookie in self._driver.get_cookies():
             session.cookies.set(cookie["name"], cookie["value"])
 
-        urls = self.url
-        if not isinstance(urls, list):
-            urls = [urls]
+        # If we're only downloading subtitles, skip video download
+        if not self.download_subtitles:
+            urls = self.url
+            if not isinstance(urls, list):
+                urls = [urls]
 
-        if not self.download_alternative_feeds:
-            # download_alternative_feeds defaults to False, slice to include only the first one
-            urls = urls[:1]
+            if not self.download_alternative_feeds:
+                # download_alternative_feeds defaults to False, slice to include only the first one
+                urls = urls[:1]
 
-        # Download attached media (Example: mediaType: Presentation can contain PDF slides)
-        cookies = {
-            cookie["name"]: cookie["value"] for cookie in self._driver.get_cookies()
-        }
-        for media in self.video_json["lesson"]["medias"]:
-            if media["mediaType"] != "Video":
-                media_filename = media["title"]
-                media_filepath = os.path.join(output_dir, media_filename)
-                media_url = (
-                    f"{self.hostname}/media/download/{media['id']}/{media_filename}"
-                )
-                if os.path.exists(media_filepath):
-                    print(
-                        "> Media {} already downloaded, skipped.".format(media_filename)
+            # Download attached media (Example: mediaType: Presentation can contain PDF slides)
+            cookies = {
+                cookie["name"]: cookie["value"] for cookie in self._driver.get_cookies()
+            }
+            for media in self.video_json["lesson"]["medias"]:
+                if media["mediaType"] != "Video":
+                    media_filename = media["title"]
+                    media_filepath = os.path.join(dirty_dir, media_filename)
+                    media_url = (
+                        f"{self.hostname}/media/download/{media['id']}/{media_filename}"
                     )
-                else:
-                    response = requests.get(media_url, cookies=cookies)
-                    if response.status_code == 200:
-                        print("> Downloading media {}...".format(media_filename))
-                        with open(media_filepath, "wb") as file:
-                            file.write(response.content)
+                    if os.path.exists(media_filepath):
+                        print(
+                            "> Media {} already downloaded, skipped.".format(media_filename)
+                        )
+                    else:
+                        response = requests.get(media_url, cookies=cookies)
+                        if response.status_code == 200:
+                            print("> Downloading media {}...".format(media_filename))
+                            with open(media_filepath, "wb") as file:
+                                file.write(response.content)
 
-        final_result = True
-        for counter, single_url in enumerate(urls):
-            if self.download_alternative_feeds:
-                print("- Downloading video feed {}...".format(counter + 1))
-            new_filename = (
-                (filename + str(counter + 1))
-                if self.download_alternative_feeds
-                else filename
+            final_result = True
+            for counter, single_url in enumerate(urls):
+                if self.download_alternative_feeds:
+                    print("- Downloading video feed {}...".format(counter + 1))
+                new_filename = (
+                    (filename + str(counter + 1))
+                    if self.download_alternative_feeds
+                    else filename
+                )
+                result = self.download_single(
+                    session, single_url, dirty_dir, new_filename, pool_size
+                )
+                final_result = final_result and result
+        else:
+            # Only download subtitles
+            final_result = self.download_single(
+                session, None, dirty_dir, filename, pool_size
             )
-            result = self.download_single(
-                session, single_url, output_dir, new_filename, pool_size
-            )
-            final_result = final_result and result
 
         return final_result
 
     def download_single(self, session, single_url, output_dir, filename, pool_size):
         filename = strip_illegal_path(filename)
         if self.download_subtitles:
-            # hacky way to get the current url media id
-            # not sure if each feed can have a different media id, so better download it for every feed.
+            # Get the media ID from the video JSON
             try:
-                media_id = [
-                    media["id"]
-                    for media in self.video_json["lesson"]["medias"]
-                    if media["id"] in single_url
-                ][0]
-            except IndexError:
-                print("  > No subtitles found.")
+                media_id = None
+                for media in self.video_json["lesson"]["medias"]:
+                    if media["mediaType"] == "Video":
+                        media_id = media["id"]
+                        break
+                
+                if media_id is None:
+                    print("  > No subtitles found - no video media ID found.")
+                    return False
+            except (KeyError, IndexError):
+                print("  > No subtitles found - could not find media information.")
+                return False
+
+            # Define paths for both dirty and clean files
+            dirty_path = os.path.join(output_dir, f"{filename}.vtt")
+            clean_dir = os.path.join(os.path.dirname(output_dir), "clean")
+            
+            if not os.path.exists(clean_dir):
+                os.makedirs(clean_dir)
+            
+            if os.path.exists(dirty_path):
+                print(" > Skipping downloaded subtitle")
             else:
-                subtitle_path = os.path.join(output_dir, f"{filename}.vtt")
-                if os.path.exists(subtitle_path):
-                    print(" > Skipping downloaded subtitle")
+                print("  > Downloading subtitles:")
+                vtt_url = f"{self.hostname}/api/ui/echoplayer/lessons/{self.video_id}/medias/{media_id}/transcript-file?format=vtt"
+                cookies = {
+                    cookie["name"]: cookie["value"]
+                    for cookie in self._driver.get_cookies()
+                }
+                response = requests.get(vtt_url, cookies=cookies)
+                if response.status_code == 200:
+                    head = requests.head(vtt_url, cookies=cookies)
+                    if head.status_code == 200:
+                        print(
+                            f"Original subtitle name: {head.headers.get('Content-Disposition', 'Unknown')}"
+                        )
+                    # Save VTT file to dirty directory
+                    with open(dirty_path, "wb") as file:
+                        file.write(response.content)
+                    print(f"  > Saved subtitle to: {dirty_path}")
+                    
+                    # Convert VTT to clean text and save in clean directory
+                    clean_path = os.path.join(clean_dir, f"{filename}.txt")
+                    clean_text = self._convert_vtt_to_text(response.content.decode('utf-8'))
+                    with open(clean_path, "w", encoding='utf-8') as file:
+                        file.write(clean_text)
+                    print(f"  > Saved clean text to: {clean_path}")
+                    return True
                 else:
-                    print("  > Downloading subtitles:")
-                    vtt_url = f"{self.hostname}/api/ui/echoplayer/lessons/{self.video_id}/medias/{media_id}/transcript-file?format=vtt"
-                    cookies = {
-                        cookie["name"]: cookie["value"]
-                        for cookie in self._driver.get_cookies()
-                    }
-                    response = requests.get(vtt_url, cookies=cookies)
-                    if response.status_code == 200:
-                        head = requests.head(vtt_url, cookies=cookies)
-                        if head.status_code == 200:
-                            print(
-                                f"Original subtitle name: {head.headers['Content-Disposition']}"
-                            )
-                        # Use same filename as mp4 since VLC will automatically use a vtt if the filename matches.
-                        with open(subtitle_path, "wb") as file:
-                            file.write(response.content)
-                    else:
-                        print("No subtitles found.")
+                    print("  > No subtitles found - API returned status code:", response.status_code)
+                    return False
+
+        # If we're not downloading subtitles, proceed with video download
+        if single_url is None:
+            return True
 
         if os.path.exists(os.path.join(output_dir, filename + ".mp4")):
             print(" > Skipping downloaded video")
@@ -467,6 +574,40 @@ class EchoCloudVideo(EchoVideo):
         print("Done!")
         print("-" * 60)
         return True
+
+    def _convert_vtt_to_text(self, vtt_content):
+        """Convert VTT content to plain text, removing timestamps and formatting."""
+        lines = vtt_content.split('\n')
+        text_lines = []
+        is_header = True
+        current_text = ""
+        
+        for line in lines:
+            # Skip VTT header
+            if is_header:
+                if line.strip() == "":
+                    is_header = False
+                continue
+            
+            # Skip empty lines and lines containing timestamps
+            if not line.strip() or '-->' in line or line.strip().replace('.', '').isdigit():
+                if current_text:
+                    text_lines.append(current_text.strip())
+                    current_text = ""
+                continue
+            
+            # Add non-empty lines that don't contain timestamps
+            if line.strip():
+                if current_text:
+                    current_text += " "
+                current_text += line.strip()
+        
+        # Add the last line if there's any remaining text
+        if current_text:
+            text_lines.append(current_text.strip())
+        
+        # Join all lines with double newlines for readability
+        return "\n\n".join(text_lines)
 
     @staticmethod
     def combine_audio_video(audio_file, video_file, final_file):
@@ -657,9 +798,9 @@ class EchoCloudVideo(EchoVideo):
 class EchoCloudSubVideo(EchoCloudVideo):
     """Some video in echo360 cloud is multi-part and this represents it."""
 
-    def __init__(self, video_json, driver, hostname, group_name, alternative_feeds):
+    def __init__(self, video_json, driver, hostname, group_name, alternative_feeds, course_name=None):
         super(EchoCloudSubVideo, self).__init__(
-            video_json, driver, hostname, alternative_feeds
+            video_json, driver, hostname, alternative_feeds, course_name=course_name
         )
         self.group_name = group_name
 
